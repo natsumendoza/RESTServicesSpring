@@ -3,15 +3,29 @@ package org.ws;
 import static org.springframework.hateoas.mvc.ControllerLinkBuilder.linkTo;
 import static org.springframework.hateoas.mvc.ControllerLinkBuilder.methodOn;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import javax.servlet.Filter;
+import javax.servlet.FilterChain;
+import javax.servlet.FilterConfig;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.security.oauth2.authserver.AuthorizationServerProperties;
+import org.springframework.boot.context.embedded.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.hateoas.Link;
 import org.springframework.hateoas.ResourceSupport;
 import org.springframework.hateoas.Resources;
@@ -19,6 +33,19 @@ import org.springframework.hateoas.VndErrors;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.authentication.configurers.GlobalAuthenticationConfigurerAdapter;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.authority.AuthorityUtils;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.oauth2.config.annotation.configurers.ClientDetailsServiceConfigurer;
+import org.springframework.security.oauth2.config.annotation.web.configuration.AuthorizationServerConfigurerAdapter;
+import org.springframework.security.oauth2.config.annotation.web.configuration.AuthorizationServerEndpointsConfiguration;
+import org.springframework.security.oauth2.config.annotation.web.configurers.AuthorizationServerEndpointsConfigurer;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -38,6 +65,46 @@ import org.ws.bookmarks.BookmarkRepository;
 public class RestServicesSpringApplication {
 	
 	@Bean
+	FilterRegistrationBean corsFilter(@Value("${tagit.origin:http://localhost:9000}") String origin) {
+		
+		return new FilterRegistrationBean(new Filter() {
+			
+			public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) throws IOException, ServletException {
+				
+				HttpServletRequest request = (HttpServletRequest) req;
+				HttpServletResponse response = (HttpServletResponse) res;
+				String method = request.getMethod();
+				// this origin value could just as easily have come from a database
+				response.setHeader("Access-Control-Allow-Origin", origin);
+				response.setHeader("Access-Control-Allow-Methods", "POST,GET,OPTIONS,DELETE");
+				response.setHeader("Access-Control-Max-Age", Long.toString(60 * 60));
+				response.setHeader("Access-Control-Allow-Credentials", "true");
+				response.setHeader(
+								"Access-Control-Allow-Headers",
+								"Origin,Accept,X-Requested-With,Content-Type,Access-Control-Request-Method,Access-Control-Request-Headers,Authorization");
+				if("OPTIONS".equals(method)) {
+					response.setStatus(HttpStatus.OK.value());
+				} else {
+					chain.doFilter(req, res);
+				}
+				
+			}
+
+			public void destroy() {
+				
+				
+			}
+
+			public void init(FilterConfig filterConfig) throws ServletException {
+				
+				
+			}
+			
+		});
+		
+	}
+	
+	@Bean
 	CommandLineRunner init(AccountRepository accountRespository, BookmarkRepository bookmarkRepository) {
 		
 		return (evt) -> Arrays.asList(
@@ -53,6 +120,61 @@ public class RestServicesSpringApplication {
 	
 	public static void main(String[] args) {
 		SpringApplication.run(RestServicesSpringApplication.class, args);
+	}
+	
+}
+
+@Configuration
+class WebSecurityConfiguration extends GlobalAuthenticationConfigurerAdapter {
+	
+	@Autowired
+	AccountRepository accountRepository;
+	
+	public void init(AuthenticationManagerBuilder auth) throws Exception {
+		auth.userDetailsService(userDetailsService());
+	}
+	
+	@Bean
+	UserDetailsService userDetailsService() {
+		return (username) -> accountRepository
+				.findByUsername(username)
+				.map(a -> new User(a.username, a.password, true, true, true, true, 
+								AuthorityUtils.createAuthorityList("USER", "write")))
+				.orElseThrow(
+								() -> new UsernameNotFoundException("could not find user '" + username + "'"));
+	}
+	
+}
+
+class OAuth2Configuration extends AuthorizationServerConfigurerAdapter  {
+	
+	String applicationName = "bookmarks";
+	
+	// This is required for password grants, which we specify below as one of the
+	// {@literal authorizedGrantTypes()}
+	@Autowired
+	AuthenticationManagerBuilder authenticationManager;
+	
+	public void configure(AuthorizationServerEndpointsConfigurer endpoints) throws Exception {
+		
+		// Workaround for https://github.com/spring-projects/spring-boot/issues/1801
+		endpoints.authenticationManager(new AuthenticationManager() {
+			
+			@Override
+			public Authentication authenticate(Authentication authentication) throws AuthenticationException {
+				return authenticationManager.getOrBuild().authenticate(authentication);
+			}
+		});
+		
+	}
+	
+	public void configure(ClientDetailsServiceConfigurer clients) throws Exception {
+		
+		clients.inMemory().withClient("android-" + applicationName)
+						.authorizedGrantTypes("password", "authorization_code", "refresh_token")
+						.authorities("ROLE_USER").scopes("write").resourceIds(applicationName)
+						.secret("123456");
+		
 	}
 	
 }
